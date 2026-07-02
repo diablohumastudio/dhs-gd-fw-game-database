@@ -1,3 +1,4 @@
+@tool
 class_name GameDatabase extends Resource
 ## Baked index of all designer data, produced by DatabaseGenerator. `paths_by_type`
 ## (saved) maps a DataItem class name -> its .tres paths. At runtime the generic
