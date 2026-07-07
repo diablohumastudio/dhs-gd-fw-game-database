@@ -1,92 +1,29 @@
 @tool
 extends EditorPlugin
 ## Class-library addon: DataItem, GameDatabase, DatabaseConfig and DatabaseGenerator
-## register via class_name. Also auto-regenerates the baked database when a .tres
-## is created/deleted/moved inside a configured type folder — the database stores
-## only paths, so in-place edits never rebake. Requires the FileSystemMonitor
-## plugin; without it, run the game's generator EditorScript manually.
-## The game points the addon at its config via CONFIG_PATH_SETTING.
+## register via class_name and need no editor hooks. Auto-regeneration of the baked
+## database lives in database_auto_regen.gd, which references FileSystemMonitor
+## classes — a peer dependency this entry script deliberately does NOT name, so the
+## addon still compiles without it (classes usable, generator runnable manually).
 
-const CONFIG_PATH_SETTING: String = "diablohumastudio/game_database/config_path"
-const REGEN_DEBOUNCE_SEC: float = 1.0
+const MONITOR_CLASS_NAME: StringName = &"DH_FileSystemMonitorPlugin"
 
-var _config: DatabaseConfig
-var _regen_timer: Timer
+var _auto_regen: Node
 
 
 func _enter_tree() -> void:
-	_load_config()
-	_create_regen_timer()
-	# Deferred: plugin load order is not guaranteed, so the monitor may not
-	# have entered the tree yet.
-	_connect_monitor.call_deferred()
-
-
-func _exit_tree() -> void:
-	var monitor: DH_FileSystemMonitorPlugin = DH_FileSystemMonitorPlugin.instance
-	if monitor and monitor.changes_detected.is_connected(_on_files_changed):
-		monitor.changes_detected.disconnect(_on_files_changed)
-
-
-func _load_config() -> void:
-	var config_path: String = ProjectSettings.get_setting(CONFIG_PATH_SETTING, "")
-	if config_path.is_empty():
-		push_warning("GameDatabase: project setting '%s' not set — auto-regeneration off." % CONFIG_PATH_SETTING)
+	if not _is_file_system_monitor_installed():
+		push_warning("GameDatabase: FileSystemMonitor addon not found — auto-regeneration off. Install https://github.com/diablohumastudio/dhs-gd-fw-file-system-monitor at addons/diablohumastudio_framework/file_system_monitor, or run the generator EditorScript manually.")
 		return
-	_config = load(config_path) as DatabaseConfig
-	if _config == null:
-		push_error("GameDatabase: '%s' is not a DatabaseConfig — auto-regeneration off." % config_path)
+	# Addon-relative dynamic path: keeps the peer dependency out of this script's
+	# parse step and survives the addon folder being relocated.
+	var auto_regen_script: GDScript = load((get_script() as Script).resource_path.get_base_dir() + "/database_auto_regen.gd")
+	_auto_regen = auto_regen_script.new()
+	add_child(_auto_regen)
 
 
-# EditorPlugins have no scene, so the debounce Timer is created dynamically.
-func _create_regen_timer() -> void:
-	_regen_timer = Timer.new()
-	_regen_timer.one_shot = true
-	_regen_timer.timeout.connect(_on_regen_timer_timeout)
-	add_child(_regen_timer)
-
-
-func _connect_monitor() -> void:
-	var monitor: DH_FileSystemMonitorPlugin = DH_FileSystemMonitorPlugin.instance
-	if monitor == null:
-		push_warning("GameDatabase: FileSystemMonitor plugin not enabled — auto-regeneration off (run the generator EditorScript manually).")
-		return
-	if not monitor.changes_detected.is_connected(_on_files_changed):
-		monitor.changes_detected.connect(_on_files_changed)
-
-
-func _on_files_changed(changes: DH_FSM_ChangeSet) -> void:
-	if _config == null:
-		return
-	if _any_watched_data_file_changed(changes):
-		_regen_timer.start(REGEN_DEBOUNCE_SEC)   # restart = debounce
-
-
-# modified_file_paths is deliberately ignored: the baked database stores only
-# paths, so editing a .tres in place never changes the bake.
-func _any_watched_data_file_changed(changes: DH_FSM_ChangeSet) -> bool:
-	for file_path: String in changes.created_file_paths:
-		if _is_watched_data_file(file_path):
-			return true
-	for file_path: String in changes.deleted_file_paths:
-		if _is_watched_data_file(file_path):
-			return true
-	for move: DH_FSM_Move in changes.moved_files:
-		if _is_watched_data_file(move.from_path) or _is_watched_data_file(move.to_path):
+func _is_file_system_monitor_installed() -> bool:
+	for global_class: Dictionary in ProjectSettings.get_global_class_list():
+		if global_class["class"] == MONITOR_CLASS_NAME:
 			return true
 	return false
-
-
-func _is_watched_data_file(file_path: String) -> bool:
-	if not file_path.ends_with(".tres"):
-		return false
-	if file_path == _config.output_path:
-		return false   # our own bake — never loop on it
-	for folder: String in _config.type_folders.values():
-		if file_path.begins_with(folder.trim_suffix("/") + "/"):
-			return true
-	return false
-
-
-func _on_regen_timer_timeout() -> void:
-	DatabaseGenerator.generate(_config)
